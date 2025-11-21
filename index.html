@@ -3,16 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GitHub 仓库浏览器（直接跳转文件）</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/styles/default.min.css">
+  <title>GitHub 仓库浏览器（加速版）</title>
   <style>
     :root{font-family:system-ui,Segoe UI,Roboto,"Hiragino Sans GB","Microsoft YaHei",sans-serif}
     body{margin:0;display:flex;flex-direction:column;min-height:100vh}
-    header{background:#0b69ff;color:white;padding:14px 18px;display:flex;gap:12px;align-items:center}
+    header{background:#0b69ff;color:white;padding:12px 16px;display:flex;gap:12px;align-items:center}
     .brand{font-weight:700;font-size:18px}
     .controls{display:flex;gap:8px;align-items:center}
     .controls input{padding:6px 8px;border-radius:6px;border:none}
-    .controls button{padding:6px 10px;border-radius:6px;border:none;background:#fff;color:#0b69ff;cursor:pointer}
+    .controls button, .controls label{padding:6px 10px;border-radius:6px;border:none;background:#fff;color:#0b69ff;cursor:pointer}
     main{display:flex;gap:18px;padding:18px;flex:1}
     .sidebar{width:360px;border-right:1px solid #eee;padding-right:12px;overflow:auto}
     .viewer{flex:1;overflow:auto;padding-left:12px}
@@ -28,17 +27,22 @@
     footer{padding:8px 18px;border-top:1px solid #eee;font-size:13px;color:#666}
     .small{font-size:13px;color:#999}
     .file-icon{width:18px;height:18px;display:inline-block;margin-right:8px}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(0,0,0,0.1);border-left-color:rgba(0,0,0,0.5);border-radius:50%;animation:spin .8s linear infinite;margin-left:8px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .fast-toggle{display:flex;align-items:center;gap:8px;margin-left:10px}
+    .note{font-size:12px;color:#666;margin-top:8px}
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">GitHub 仓库浏览器（直接跳转文件）</div>
+    <div class="brand">GitHub 仓库浏览器（加速版）</div>
     <div class="controls" style="margin-left:auto">
       <input id="owner" placeholder="owner" title="仓库所有者" />
       <input id="repo" placeholder="repo" title="仓库名" />
       <input id="branch" placeholder="branch (默认：main)" style="width:120px" />
-      <input id="token" placeholder="(可选) GitHub token（提高速率限制）" style="width:260px" />
+      <input id="token" placeholder="(可选) GitHub token（提高速率限制）" style="width:240px" />
       <button id="loadBtn">加载</button>
+      <label class="fast-toggle"><input type="checkbox" id="fastMode"> 使用快速树模式（一次拉取全部文件）</label>
     </div>
   </header>
 
@@ -52,17 +56,16 @@
     <section class="viewer" id="viewer">
       <div id="viewerHeader" class="small"></div>
       <div id="viewerContent" style="margin-top:12px"></div>
+      <div class="note">优化策略：启用“快速树模式”则只做一次 API 请求（<code>/git/trees?recursive=1</code>），随后本地导航即时响应；未启用时使用按需加载 + 缓存与悬停预取。</div>
     </section>
   </main>
 
   <footer>
-    将此文件放在你的 GitHub Pages 分支（通常是 main 或 gh-pages）根目录下并命名为 <code>index.html</code> 即可。
-    <div class="small" style="margin-top:6px">行为说明：点击 <strong>文件</strong> 会直接跳转到该文件在 Pages 下的 URL（例如 <code>/a.png</code> 或 <code>/b/c.png</code>）。点击 <strong>文件夹</strong> 会在左侧进入该目录并列出其内容。</div>
-    <div class="small" style="margin-top:6px">注意：未认证的 GitHub API 限制为每小时 60 次请求。你可选地在页面填入个人访问令牌以提高速率限制（仅在受信环境中使用）。</div>
+    把此文件放在你 GitHub Pages 的根目录（`index.html`）并推送即可。<br>
+    注意：对于非常大的仓库（上万文件），一次性拉取整棵树会消耗较多时间/带宽与 API 限额；如果仓库很大请关闭快速模式，脚本会使用按需加载 + 缓存。
   </footer>
 
 <script>
-// 简化版：点击文件直接跳转到相对路径（适用于 GitHub Pages）
 const $ = id => document.getElementById(id);
 const fileListEl = $('fileList');
 const breadcrumbEl = $('breadcrumb');
@@ -73,36 +76,86 @@ const repoInput = $('repo');
 const branchInput = $('branch');
 const tokenInput = $('token');
 const loadBtn = $('loadBtn');
+const fastModeCheckbox = $('fastMode');
 
 let state = { owner: null, repo: null, branch: 'main', path: '' };
+let directoryCache = new Map(); // path -> array of items
+let etagCache = new Map(); // path -> ETag
+let treeIndex = null; // when fast mode used: { parent -> [items] }
 
 function guessFromLocation(){
   try{
-    const host = location.hostname; // e.g. username.github.io
+    const host = location.hostname;
     if(host.endsWith('.github.io')){
       const owner = host.split('.github.io')[0];
-      const parts = location.pathname.split('/').filter(Boolean); // e.g. ["repo", ...]
+      const parts = location.pathname.split('/').filter(Boolean);
       const repo = parts.length ? parts[0] : `${owner}.github.io`;
       return {owner, repo};
     }
-  }catch(e){/* ignore */}
+  }catch(e){}
   return null;
 }
 
 function setState(up){ state = {...state, ...up}; ownerInput.value = state.owner || ''; repoInput.value = state.repo || ''; branchInput.value = state.branch || 'main'; }
 
-function apiHeaders(){
+function apiHeaders(ifNoneMatch){
   const headers = { 'Accept': 'application/vnd.github.v3+json' };
   const t = tokenInput.value.trim();
   if(t) headers['Authorization'] = 'token ' + t;
+  if(ifNoneMatch) headers['If-None-Match'] = ifNoneMatch;
   return headers;
 }
 
 async function apiList(path){
+  // If using fast tree and already have index, serve from it
+  if(treeIndex){
+    const arr = treeIndex.get(path || '') || [];
+    return arr.slice();
+  }
+
+  // Check in-memory cache
+  if(directoryCache.has(path)) return directoryCache.get(path);
+
   const url = `https://api.github.com/repos/${state.owner}/${state.repo}/contents/${path || ''}?ref=${encodeURIComponent(state.branch)}`;
-  const resp = await fetch(url, {headers: apiHeaders()});
+  const etag = etagCache.get(path);
+  const resp = await fetch(url, {headers: apiHeaders(etag)});
+  if(resp.status === 304){
+    // Not modified
+    return directoryCache.get(path) || [];
+  }
   if(!resp.ok) throw new Error(`请求失败: ${resp.status} ${resp.statusText}`);
-  return resp.json();
+  const j = await resp.json();
+  // save ETag
+  const respEtag = resp.headers.get('ETag');
+  if(respEtag) etagCache.set(path, respEtag);
+  if(Array.isArray(j)){
+    directoryCache.set(path, j);
+  }
+  return j;
+}
+
+async function fetchFullTree(){
+  // GET /repos/:owner/:repo/git/trees/:branch?recursive=1
+  const url = `https://api.github.com/repos/${state.owner}/${state.repo}/git/trees/${encodeURIComponent(state.branch)}?recursive=1`;
+  const resp = await fetch(url, {headers: apiHeaders()});
+  if(!resp.ok) throw new Error(`树请求失败: ${resp.status} ${resp.statusText}`);
+  const j = await resp.json();
+  if(!j.tree) throw new Error('返回数据异常');
+  // build index: parent path -> items[] (each item: {name,type,path,mode,sha})
+  const index = new Map();
+  for(const entry of j.tree){
+    // entry.path like "b/c.png" or "a.png" ; entry.type: 'blob' or 'tree'
+    const parts = entry.path.split('/');
+    const name = parts.pop();
+    const parent = parts.join('/');
+    const item = { name, path: entry.path, type: entry.type === 'tree' ? 'dir' : 'file', size: entry.size || 0 };
+    if(!index.has(parent)) index.set(parent, []);
+    index.get(parent).push(item);
+  }
+  // sort children
+  for(const [k,v] of index) v.sort((a,b)=>{ if(a.type===b.type) return a.name.localeCompare(b.name); return a.type==='dir' ? -1:1; });
+  treeIndex = index;
+  return index;
 }
 
 function ext(name){ const m = name.match(/\.([^.]+)$/); return m ? m[1].toLowerCase() : ''; }
@@ -120,31 +173,29 @@ function makeIcon(type, name){
 function renderList(items){
   fileListEl.innerHTML = '';
   if(!items || !items.length){ fileListEl.innerHTML = '<li class="empty">（空）</li>'; return; }
-  items.sort((a,b)=>{ if(a.type===b.type) return a.name.localeCompare(b.name); return a.type==='dir' ? -1 : 1; });
   items.forEach(it=>{
     const li = document.createElement('li');
     if(it.type === 'dir'){
-      const left = document.createElement('div');
-      left.style.display='flex'; left.style.alignItems='center';
+      const left = document.createElement('div'); left.style.display='flex'; left.style.alignItems='center';
       left.innerHTML = `<span class="file-icon">${makeIcon('dir',it.name)}</span><strong>${it.name}</strong>`;
-      const right = document.createElement('div');
-      right.className='meta';
-      right.textContent = '目录';
+      const right = document.createElement('div'); right.className='meta'; right.textContent = '目录';
       li.appendChild(left); li.appendChild(right);
+      // hover prefetch (if not in full-tree mode)
+      let hoverTimer = null;
+      li.addEventListener('mouseenter', ()=>{
+        if(treeIndex) return; // no need
+        if(directoryCache.has((state.path?state.path+'/':'') + it.name)) return;
+        hoverTimer = setTimeout(()=>{ apiList((state.path?state.path+'/':'') + it.name).catch(()=>{}); }, 180);
+      });
+      li.addEventListener('mouseleave', ()=>{ if(hoverTimer) clearTimeout(hoverTimer); });
       li.addEventListener('click', ()=>{ navigateTo((state.path?state.path+'/':'') + it.name); });
     } else {
-      // 文件：直接用相对链接，点击跳转到 github.io/.../path
       const filePath = (state.path?state.path+'/':'') + it.name;
       const a = document.createElement('a');
       a.href = encodeURI(filePath);
       a.title = filePath;
-      a.addEventListener('click', (e)=>{
-        // 默认行为：跳转（在当前页）。如果你想在新标签打开，按住 ctrl/cmd 点击即可。
-      });
       a.innerHTML = `<span style="display:flex;align-items:center;width:100%"><span class="file-icon">${makeIcon('file',it.name)}</span><strong>${it.name}</strong></span>`;
-      const right = document.createElement('div');
-      right.className='meta';
-      right.textContent = it.size ? (it.size + ' bytes') : '文件';
+      const right = document.createElement('div'); right.className='meta'; right.textContent = it.size ? (it.size + ' bytes') : '文件';
       li.appendChild(a); li.appendChild(right);
     }
     fileListEl.appendChild(li);
@@ -168,12 +219,16 @@ async function navigateTo(path){
   viewerContent.innerHTML = '';
   viewerHeader.textContent = `正在列出: /${state.path}`;
   try{
-    const res = await apiList(state.path);
+    let res = await apiList(state.path);
     if(!Array.isArray(res)){
-      // API 返回单个文件元信息（用户直接调用了文件路径的 contents 接口），我们仍然在此将页面跳转到相对路径
-      const filePath = state.path;
-      location.href = encodeURI(filePath);
+      // If API returned single file metadata (rare), redirect to relative path
+      location.href = encodeURI(state.path);
       return;
+    }
+    // If treeIndex mode is on and apiList returned object (shouldn't), fall back
+    // but if treeIndex exists, items should be plain objects; ensure unified
+    if(treeIndex){
+      res = treeIndex.get(state.path) || [];
     }
     renderList(res);
     viewerHeader.textContent = `已列出: /${state.path} （共 ${res.length} 项）`;
@@ -183,16 +238,40 @@ async function navigateTo(path){
   }
 }
 
+async function buildAndNavigate(){
+  // clear caches
+  directoryCache.clear(); etagCache.clear(); treeIndex = null;
+  const fast = fastModeCheckbox.checked;
+  if(fast){
+    viewerHeader.innerHTML = `正在拉取整棵树 <span class="spinner"></span>`;
+    try{
+      const idx = await fetchFullTree();
+      viewerHeader.textContent = `已索引整棵树，立即响应导航`;
+      // prefill directoryCache for root
+      const root = idx.get('') || [];
+      directoryCache.set('', root);
+      navigateTo('');
+    }catch(err){
+      viewerContent.innerHTML = `<div class="empty">树拉取失败：${err.message}</div>`;
+      viewerHeader.textContent = `错误`;
+    }
+  } else {
+    // normal mode: navigate root and cache it
+    directoryCache.clear(); etagCache.clear();
+    navigateTo('');
+  }
+}
+
 loadBtn.addEventListener('click', ()=>{
   const owner = ownerInput.value.trim();
   const repo = repoInput.value.trim();
   const branch = branchInput.value.trim() || 'main';
   if(!owner || !repo){ alert('请填写 owner 和 repo'); return; }
   setState({owner, repo, branch, path: ''});
-  navigateTo('');
+  buildAndNavigate();
 });
 
-// init
+// init (try auto-detect)
 (function(){
   const guess = guessFromLocation();
   if(guess){ setState({owner: guess.owner, repo: guess.repo, branch: 'main'}); }
