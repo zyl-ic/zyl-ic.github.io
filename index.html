@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GitHub 仓库浏览器</title>
+  <title>GitHub 仓库浏览器（直接跳转文件）</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/styles/default.min.css">
   <style>
     :root{font-family:system-ui,Segoe UI,Roboto,"Hiragino Sans GB","Microsoft YaHei",sans-serif}
@@ -17,7 +17,8 @@
     .sidebar{width:360px;border-right:1px solid #eee;padding-right:12px;overflow:auto}
     .viewer{flex:1;overflow:auto;padding-left:12px}
     .list{list-style:none;margin:0;padding:0}
-    .list li{padding:8px 10px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+    .list li{padding:8px 10px;border-radius:8px;display:flex;justify-content:space-between;align-items:center}
+    .list li a{display:flex;align-items:center;text-decoration:none;color:inherit;width:100%}
     .list li:hover{background:#f3f7ff}
     .meta{font-size:12px;color:#666}
     .breadcrumb{margin:12px 0;font-size:14px}
@@ -31,7 +32,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">GitHub 仓库浏览器</div>
+    <div class="brand">GitHub 仓库浏览器（直接跳转文件）</div>
     <div class="controls" style="margin-left:auto">
       <input id="owner" placeholder="owner" title="仓库所有者" />
       <input id="repo" placeholder="repo" title="仓库名" />
@@ -56,16 +57,12 @@
 
   <footer>
     将此文件放在你的 GitHub Pages 分支（通常是 main 或 gh-pages）根目录下并命名为 <code>index.html</code> 即可。
-    <div class="small" style="margin-top:6px">注意：未认证的 GitHub API 限制为每小时 60 次请求。可选地在右侧输入你的个人访问令牌以提高速率限制（仅在你本地/受信环境中使用）。</div>
+    <div class="small" style="margin-top:6px">行为说明：点击 <strong>文件</strong> 会直接跳转到该文件在 Pages 下的 URL（例如 <code>/a.png</code> 或 <code>/b/c.png</code>）。点击 <strong>文件夹</strong> 会在左侧进入该目录并列出其内容。</div>
+    <div class="small" style="margin-top:6px">注意：未认证的 GitHub API 限制为每小时 60 次请求。你可选地在页面填入个人访问令牌以提高速率限制（仅在受信环境中使用）。</div>
   </footer>
 
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@2.4.0/dist/purify.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/highlight.min.js"></script>
 <script>
-// Small, single-file GitHub repo browser for GitHub Pages
-// 自动尝试检测 owner/repo（当你使用 username.github.io 或 username.github.io/repo 时）
-
+// 简化版：点击文件直接跳转到相对路径（适用于 GitHub Pages）
 const $ = id => document.getElementById(id);
 const fileListEl = $('fileList');
 const breadcrumbEl = $('breadcrumb');
@@ -102,7 +99,6 @@ function apiHeaders(){
 }
 
 async function apiList(path){
-  const p = path ? encodeURIComponent(path) : '';
   const url = `https://api.github.com/repos/${state.owner}/${state.repo}/contents/${path || ''}?ref=${encodeURIComponent(state.branch)}`;
   const resp = await fetch(url, {headers: apiHeaders()});
   if(!resp.ok) throw new Error(`请求失败: ${resp.status} ${resp.statusText}`);
@@ -111,44 +107,46 @@ async function apiList(path){
 
 function ext(name){ const m = name.match(/\.([^.]+)$/); return m ? m[1].toLowerCase() : ''; }
 function isImage(extn){ return ['png','jpg','jpeg','gif','bmp','webp','svg'].includes(extn); }
-function isPdf(extn){ return extn === 'pdf'; }
-function isAudio(extn){ return ['mp3','wav','ogg','m4a'].includes(extn); }
-function isVideo(extn){ return ['mp4','webm','ogg','mov'].includes(extn); }
 function isMarkdown(extn){ return ['md','markdown','mdown'].includes(extn); }
-function isTextLike(extn){ // common code/text extensions
-  return ['txt','js','json','css','html','py','java','c','cpp','h','sh','yml','yaml','rb','go','rs','php','ts','tsx','jsx','md','markdown'].includes(extn);
-}
 
 function makeIcon(type, name){
   if(type === 'dir') return '📁';
   const e = ext(name);
   if(isImage(e)) return '🖼️';
   if(isMarkdown(e)) return '📝';
-  if(isTextLike(e)) return '📄';
-  return '📦';
+  return '📄';
 }
 
 function renderList(items){
   fileListEl.innerHTML = '';
   if(!items || !items.length){ fileListEl.innerHTML = '<li class="empty">（空）</li>'; return; }
-  // directories first
   items.sort((a,b)=>{ if(a.type===b.type) return a.name.localeCompare(b.name); return a.type==='dir' ? -1 : 1; });
   items.forEach(it=>{
     const li = document.createElement('li');
-    const left = document.createElement('div');
-    left.style.display='flex'; left.style.alignItems='center';
-    left.innerHTML = `<span class="file-icon">${makeIcon(it.type||'file', it.name)}</span><strong>${it.name}</strong>`;
-    const right = document.createElement('div');
-    right.className='meta';
-    right.textContent = it.type === 'dir' ? '目录' : (it.size ? (it.size + ' bytes') : '文件');
-    li.appendChild(left); li.appendChild(right);
-    li.addEventListener('click', ()=>{
-      if(it.type === 'dir'){
-        navigateTo((state.path?state.path+'/':'') + it.name);
-      } else {
-        openFile((state.path?state.path+'/':'') + it.name, it);
-      }
-    });
+    if(it.type === 'dir'){
+      const left = document.createElement('div');
+      left.style.display='flex'; left.style.alignItems='center';
+      left.innerHTML = `<span class="file-icon">${makeIcon('dir',it.name)}</span><strong>${it.name}</strong>`;
+      const right = document.createElement('div');
+      right.className='meta';
+      right.textContent = '目录';
+      li.appendChild(left); li.appendChild(right);
+      li.addEventListener('click', ()=>{ navigateTo((state.path?state.path+'/':'') + it.name); });
+    } else {
+      // 文件：直接用相对链接，点击跳转到 github.io/.../path
+      const filePath = (state.path?state.path+'/':'') + it.name;
+      const a = document.createElement('a');
+      a.href = encodeURI(filePath);
+      a.title = filePath;
+      a.addEventListener('click', (e)=>{
+        // 默认行为：跳转（在当前页）。如果你想在新标签打开，按住 ctrl/cmd 点击即可。
+      });
+      a.innerHTML = `<span style="display:flex;align-items:center;width:100%"><span class="file-icon">${makeIcon('file',it.name)}</span><strong>${it.name}</strong></span>`;
+      const right = document.createElement('div');
+      right.className='meta';
+      right.textContent = it.size ? (it.size + ' bytes') : '文件';
+      li.appendChild(a); li.appendChild(right);
+    }
     fileListEl.appendChild(li);
   });
 }
@@ -171,10 +169,10 @@ async function navigateTo(path){
   viewerHeader.textContent = `正在列出: /${state.path}`;
   try{
     const res = await apiList(state.path);
-    // if result is an object (file), GitHub API returned the file instead of directory
     if(!Array.isArray(res)){
-      // open file directly
-      openFile(state.path, res);
+      // API 返回单个文件元信息（用户直接调用了文件路径的 contents 接口），我们仍然在此将页面跳转到相对路径
+      const filePath = state.path;
+      location.href = encodeURI(filePath);
       return;
     }
     renderList(res);
@@ -184,78 +182,6 @@ async function navigateTo(path){
     viewerHeader.textContent = `错误`;
   }
 }
-
-async function openFile(path, meta){
-  viewerHeader.textContent = `正在打开: /${path}`;
-  viewerContent.innerHTML = '<div class="small">加载中…</div>';
-  try{
-    // if meta provided and download_url exists, use it
-    let download = meta && meta.download_url ? meta.download_url : null;
-    if(!download){
-      // try to call contents endpoint for the file to get download_url
-      const url = `https://api.github.com/repos/${state.owner}/${state.repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(state.branch)}`;
-      const resp = await fetch(url, {headers: apiHeaders()});
-      if(!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-      const j = await resp.json();
-      download = j.download_url;
-      meta = j;
-    }
-    if(!download) throw new Error('无法获取文件下载地址');
-    const e = ext(path);
-    if(isImage(e)){
-      viewerContent.innerHTML = `<img src="${download}" alt="${path}"/>`;
-      viewerHeader.textContent = `图片: /${path}`;
-      return;
-    }
-    if(isPdf(e)){
-      viewerContent.innerHTML = `<iframe src="${download}" style="width:100%;height:80vh;border:none"></iframe>`;
-      viewerHeader.textContent = `PDF: /${path}`;
-      return;
-    }
-    if(isAudio(e)){
-      viewerContent.innerHTML = `<audio controls src="${download}">你的浏览器不支持 audio 标签</audio>`;
-      viewerHeader.textContent = `音频: /${path}`;
-      return;
-    }
-    if(isVideo(e)){
-      viewerContent.innerHTML = `<video controls style="max-width:100%" src="${download}">你的浏览器不支持 video 标签</video>`;
-      viewerHeader.textContent = `视频: /${path}`;
-      return;
-    }
-
-    // try to fetch as text
-    const resp = await fetch(download, {headers: apiHeaders()});
-    if(!resp.ok) throw new Error(`下载失败: ${resp.status} ${resp.statusText}`);
-    const blob = await resp.blob();
-    const isProbablyText = blob.type.startsWith('text/') || isTextLike(e) || isMarkdown(e);
-    if(isProbablyText){
-      const txt = await blob.text();
-      if(isMarkdown(e)){
-        const html = DOMPurify.sanitize(marked.parse(txt));
-        viewerContent.innerHTML = html;
-        viewerHeader.textContent = `Markdown: /${path}`;
-        return;
-      }
-      // show code/text with syntax highlight
-      viewerContent.innerHTML = `<pre><code>${escapeHtml(txt)}</code></pre>`;
-      viewerHeader.textContent = `文件: /${path}`;
-      // highlight
-      document.querySelectorAll('pre code').forEach((block)=>{ hljs.highlightBlock(block); });
-      return;
-    } else {
-      // binary file: provide download link and try to preview if image/pdf handled above
-      const url = URL.createObjectURL(blob);
-      viewerContent.innerHTML = `<div class="small">二进制文件，无法直接显示。</div><div style="margin-top:12px"><a href="${url}" download="${meta.name}">下载 ${meta.name}</a></div>`;
-      viewerHeader.textContent = `二进制文件: /${path}`;
-      return;
-    }
-  }catch(err){
-    viewerContent.innerHTML = `<div class="empty">错误：${err.message}</div>`;
-    viewerHeader.textContent = `错误`;
-  }
-}
-
-function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 loadBtn.addEventListener('click', ()=>{
   const owner = ownerInput.value.trim();
@@ -270,7 +196,6 @@ loadBtn.addEventListener('click', ()=>{
 (function(){
   const guess = guessFromLocation();
   if(guess){ setState({owner: guess.owner, repo: guess.repo, branch: 'main'}); }
-  // if user doesn't click, still try to load automatically (best-effort)
   if(state.owner && state.repo){ navigateTo(''); }
 })();
 </script>
