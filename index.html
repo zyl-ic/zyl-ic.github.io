@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GitHub 仓库浏览器（加速版）</title>
+  <title>GitHub 仓库浏览器（加速版 + 复制地址）</title>
   <style>
     :root{font-family:system-ui,Segoe UI,Roboto,"Hiragino Sans GB","Microsoft YaHei",sans-serif}
     body{margin:0;display:flex;flex-direction:column;min-height:100vh}
@@ -31,11 +31,13 @@
     @keyframes spin{to{transform:rotate(360deg)}}
     .fast-toggle{display:flex;align-items:center;gap:8px;margin-left:10px}
     .note{font-size:12px;color:#666;margin-top:8px}
+    .copy-btn{padding:4px 8px;border-radius:6px;border:1px solid #ddd;background:#fff;cursor:pointer;margin-left:8px;font-size:12px}
+    .copy-btn.copied{background:#0b69ff;color:#fff;border-color:#0b69ff}
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">GitHub 仓库浏览器（加速版）</div>
+    <div class="brand">GitHub 仓库浏览器（加速版 + 复制地址）</div>
     <div class="controls" style="margin-left:auto">
       <input id="owner" placeholder="owner" title="仓库所有者" />
       <input id="repo" placeholder="repo" title="仓库名" />
@@ -56,7 +58,7 @@
     <section class="viewer" id="viewer">
       <div id="viewerHeader" class="small"></div>
       <div id="viewerContent" style="margin-top:12px"></div>
-      <div class="note">优化策略：启用“快速树模式”则只做一次 API 请求（<code>/git/trees?recursive=1</code>），随后本地导航即时响应；未启用时使用按需加载 + 缓存与悬停预取。</div>
+      <div class="note">优化策略：启用“快速树模式”则只做一次 API 请求（<code>/git/trees?recursive=1</code>），随后本地导航即时响应；未启用时使用按需加载 + 缓存与悬停预取。点击文件会跳转到相对路径，右侧提供“复制地址”按钮复制文件的完整 Pages URL。</div>
     </section>
   </main>
 
@@ -81,7 +83,7 @@ const fastModeCheckbox = $('fastMode');
 let state = { owner: null, repo: null, branch: 'main', path: '' };
 let directoryCache = new Map(); // path -> array of items
 let etagCache = new Map(); // path -> ETag
-let treeIndex = null; // when fast mode used: { parent -> [items] }
+let treeIndex = null; // when fast mode used: Map parent -> [items]
 
 function guessFromLocation(){
   try{
@@ -107,44 +109,33 @@ function apiHeaders(ifNoneMatch){
 }
 
 async function apiList(path){
-  // If using fast tree and already have index, serve from it
   if(treeIndex){
     const arr = treeIndex.get(path || '') || [];
     return arr.slice();
   }
-
-  // Check in-memory cache
   if(directoryCache.has(path)) return directoryCache.get(path);
-
   const url = `https://api.github.com/repos/${state.owner}/${state.repo}/contents/${path || ''}?ref=${encodeURIComponent(state.branch)}`;
   const etag = etagCache.get(path);
   const resp = await fetch(url, {headers: apiHeaders(etag)});
   if(resp.status === 304){
-    // Not modified
     return directoryCache.get(path) || [];
   }
   if(!resp.ok) throw new Error(`请求失败: ${resp.status} ${resp.statusText}`);
   const j = await resp.json();
-  // save ETag
   const respEtag = resp.headers.get('ETag');
   if(respEtag) etagCache.set(path, respEtag);
-  if(Array.isArray(j)){
-    directoryCache.set(path, j);
-  }
+  if(Array.isArray(j)) directoryCache.set(path, j);
   return j;
 }
 
 async function fetchFullTree(){
-  // GET /repos/:owner/:repo/git/trees/:branch?recursive=1
   const url = `https://api.github.com/repos/${state.owner}/${state.repo}/git/trees/${encodeURIComponent(state.branch)}?recursive=1`;
   const resp = await fetch(url, {headers: apiHeaders()});
   if(!resp.ok) throw new Error(`树请求失败: ${resp.status} ${resp.statusText}`);
   const j = await resp.json();
   if(!j.tree) throw new Error('返回数据异常');
-  // build index: parent path -> items[] (each item: {name,type,path,mode,sha})
   const index = new Map();
   for(const entry of j.tree){
-    // entry.path like "b/c.png" or "a.png" ; entry.type: 'blob' or 'tree'
     const parts = entry.path.split('/');
     const name = parts.pop();
     const parent = parts.join('/');
@@ -152,7 +143,6 @@ async function fetchFullTree(){
     if(!index.has(parent)) index.set(parent, []);
     index.get(parent).push(item);
   }
-  // sort children
   for(const [k,v] of index) v.sort((a,b)=>{ if(a.type===b.type) return a.name.localeCompare(b.name); return a.type==='dir' ? -1:1; });
   treeIndex = index;
   return index;
@@ -170,6 +160,17 @@ function makeIcon(type, name){
   return '📄';
 }
 
+function getSiteBase(){
+  // Construct base URL for Pages files.
+  // If repo is "owner.github.io" treat as user page (root at origin)
+  if(!state.owner || !state.repo) return location.origin + '/';
+  if(state.repo.toLowerCase() === (state.owner.toLowerCase() + '.github.io')){
+    return location.origin + '/';
+  }
+  // project page: origin + /repo/
+  return location.origin + '/' + state.repo + '/';
+}
+
 function renderList(items){
   fileListEl.innerHTML = '';
   if(!items || !items.length){ fileListEl.innerHTML = '<li class="empty">（空）</li>'; return; }
@@ -180,13 +181,8 @@ function renderList(items){
       left.innerHTML = `<span class="file-icon">${makeIcon('dir',it.name)}</span><strong>${it.name}</strong>`;
       const right = document.createElement('div'); right.className='meta'; right.textContent = '目录';
       li.appendChild(left); li.appendChild(right);
-      // hover prefetch (if not in full-tree mode)
       let hoverTimer = null;
-      li.addEventListener('mouseenter', ()=>{
-        if(treeIndex) return; // no need
-        if(directoryCache.has((state.path?state.path+'/':'') + it.name)) return;
-        hoverTimer = setTimeout(()=>{ apiList((state.path?state.path+'/':'') + it.name).catch(()=>{}); }, 180);
-      });
+      li.addEventListener('mouseenter', ()=>{ if(treeIndex) return; if(directoryCache.has((state.path?state.path+'/':'') + it.name)) return; hoverTimer = setTimeout(()=>{ apiList((state.path?state.path+'/':'') + it.name).catch(()=>{}); }, 180); });
       li.addEventListener('mouseleave', ()=>{ if(hoverTimer) clearTimeout(hoverTimer); });
       li.addEventListener('click', ()=>{ navigateTo((state.path?state.path+'/':'') + it.name); });
     } else {
@@ -196,7 +192,34 @@ function renderList(items){
       a.title = filePath;
       a.innerHTML = `<span style="display:flex;align-items:center;width:100%"><span class="file-icon">${makeIcon('file',it.name)}</span><strong>${it.name}</strong></span>`;
       const right = document.createElement('div'); right.className='meta'; right.textContent = it.size ? (it.size + ' bytes') : '文件';
-      li.appendChild(a); li.appendChild(right);
+
+      // copy button
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'copy-btn';
+      copyBtn.type = 'button';
+      copyBtn.textContent = '复制地址';
+      copyBtn.title = '复制文件在 Pages 下的完整 URL';
+      copyBtn.addEventListener('click', async (ev)=>{
+        ev.preventDefault(); ev.stopPropagation();
+        const base = getSiteBase();
+        const url = base + filePath;
+        try{
+          if(navigator.clipboard && navigator.clipboard.writeText){
+            await navigator.clipboard.writeText(url);
+          } else {
+            // fallback
+            const ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+          }
+          copyBtn.classList.add('copied');
+          const old = copyBtn.textContent;
+          copyBtn.textContent = '已复制';
+          setTimeout(()=>{ copyBtn.classList.remove('copied'); copyBtn.textContent = old; }, 1400);
+        }catch(e){
+          alert('复制失败：' + e.message);
+        }
+      });
+
+      li.appendChild(a); li.appendChild(right); li.appendChild(copyBtn);
     }
     fileListEl.appendChild(li);
   });
@@ -208,9 +231,7 @@ function updateBreadcrumb(){
   let cur = '';
   parts.forEach((p,i)=>{ cur += (i?'/':'')+p; html += ` / <a href='#' data-path='${cur}'>${p}</a>`; });
   breadcrumbEl.innerHTML = html;
-  breadcrumbEl.querySelectorAll('a').forEach(a=>{
-    a.addEventListener('click', (ev)=>{ ev.preventDefault(); const p = a.getAttribute('data-path'); navigateTo(p); });
-  });
+  breadcrumbEl.querySelectorAll('a').forEach(a=>{ a.addEventListener('click', (ev)=>{ ev.preventDefault(); const p = a.getAttribute('data-path'); navigateTo(p); }); });
 }
 
 async function navigateTo(path){
@@ -221,15 +242,10 @@ async function navigateTo(path){
   try{
     let res = await apiList(state.path);
     if(!Array.isArray(res)){
-      // If API returned single file metadata (rare), redirect to relative path
       location.href = encodeURI(state.path);
       return;
     }
-    // If treeIndex mode is on and apiList returned object (shouldn't), fall back
-    // but if treeIndex exists, items should be plain objects; ensure unified
-    if(treeIndex){
-      res = treeIndex.get(state.path) || [];
-    }
+    if(treeIndex){ res = treeIndex.get(state.path) || []; }
     renderList(res);
     viewerHeader.textContent = `已列出: /${state.path} （共 ${res.length} 项）`;
   }catch(err){
@@ -239,7 +255,6 @@ async function navigateTo(path){
 }
 
 async function buildAndNavigate(){
-  // clear caches
   directoryCache.clear(); etagCache.clear(); treeIndex = null;
   const fast = fastModeCheckbox.checked;
   if(fast){
@@ -247,7 +262,6 @@ async function buildAndNavigate(){
     try{
       const idx = await fetchFullTree();
       viewerHeader.textContent = `已索引整棵树，立即响应导航`;
-      // prefill directoryCache for root
       const root = idx.get('') || [];
       directoryCache.set('', root);
       navigateTo('');
@@ -256,7 +270,6 @@ async function buildAndNavigate(){
       viewerHeader.textContent = `错误`;
     }
   } else {
-    // normal mode: navigate root and cache it
     directoryCache.clear(); etagCache.clear();
     navigateTo('');
   }
@@ -271,7 +284,6 @@ loadBtn.addEventListener('click', ()=>{
   buildAndNavigate();
 });
 
-// init (try auto-detect)
 (function(){
   const guess = guessFromLocation();
   if(guess){ setState({owner: guess.owner, repo: guess.repo, branch: 'main'}); }
