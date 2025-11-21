@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GitHub 仓库浏览器（加速版 + 复制地址）</title>
+  <title>GitHub 仓库浏览器（加速版 + 复制地址，布局修复）</title>
   <style>
     :root{font-family:system-ui,Segoe UI,Roboto,"Hiragino Sans GB","Microsoft YaHei",sans-serif}
     body{margin:0;display:flex;flex-direction:column;min-height:100vh}
@@ -16,10 +16,14 @@
     .sidebar{width:360px;border-right:1px solid #eee;padding-right:12px;overflow:auto}
     .viewer{flex:1;overflow:auto;padding-left:12px}
     .list{list-style:none;margin:0;padding:0}
-    .list li{padding:8px 10px;border-radius:8px;display:flex;justify-content:space-between;align-items:center}
+    /* 每行使用三栏布局：左侧 name（可收缩），中间 meta（可收缩，但优先显示），右侧 actions（不收缩，固定显示） */
+    .list li{padding:8px 10px;border-radius:8px;display:flex;align-items:center;gap:8px}
+    .list li .left{display:flex;align-items:center;flex:1;min-width:0} /* min-width:0 允许子元素溢出而被截断 */
+    .list li .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .list li .meta{font-size:12px;color:#666;flex:0 0 auto;min-width:70px;text-align:right}
+    .list li .actions{display:flex;gap:8px;flex:0 0 auto}
     .list li a{display:flex;align-items:center;text-decoration:none;color:inherit;width:100%}
     .list li:hover{background:#f3f7ff}
-    .meta{font-size:12px;color:#666}
     .breadcrumb{margin:12px 0;font-size:14px}
     .viewer pre{white-space:pre-wrap;background:#0f1720;color:#f8fafc;padding:12px;border-radius:8px;overflow:auto}
     .viewer img{max-width:100%;height:auto;border-radius:6px}
@@ -33,11 +37,13 @@
     .note{font-size:12px;color:#666;margin-top:8px}
     .copy-btn{padding:4px 8px;border-radius:6px;border:1px solid #ddd;background:#fff;cursor:pointer;margin-left:8px;font-size:12px}
     .copy-btn.copied{background:#0b69ff;color:#fff;border-color:#0b69ff}
+    /* small helper for very long names: show tooltip on hover */
+    .name[title]{cursor:default}
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">GitHub 仓库浏览器（加速版 + 复制地址）</div>
+    <div class="brand">GitHub 仓库浏览器（加速版 + 复制地址，布局修复）</div>
     <div class="controls" style="margin-left:auto">
       <input id="owner" placeholder="owner" title="仓库所有者" />
       <input id="repo" placeholder="repo" title="仓库名" />
@@ -58,7 +64,7 @@
     <section class="viewer" id="viewer">
       <div id="viewerHeader" class="small"></div>
       <div id="viewerContent" style="margin-top:12px"></div>
-      <div class="note">优化策略：启用“快速树模式”则只做一次 API 请求（<code>/git/trees?recursive=1</code>），随后本地导航即时响应；未启用时使用按需加载 + 缓存与悬停预取。点击文件会跳转到相对路径，右侧提供“复制地址”按钮复制文件的完整 Pages URL。</div>
+      <div class="note">布局修复：文件名过长时会显示省略号，复制按钮和元信息放在右侧固定区域永远可见。如果希望文件名换行显示，也可以改为换行样式。</div>
     </section>
   </main>
 
@@ -81,9 +87,9 @@ const loadBtn = $('loadBtn');
 const fastModeCheckbox = $('fastMode');
 
 let state = { owner: null, repo: null, branch: 'main', path: '' };
-let directoryCache = new Map(); // path -> array of items
-let etagCache = new Map(); // path -> ETag
-let treeIndex = null; // when fast mode used: Map parent -> [items]
+let directoryCache = new Map();
+let etagCache = new Map();
+let treeIndex = null;
 
 function guessFromLocation(){
   try{
@@ -152,22 +158,13 @@ function ext(name){ const m = name.match(/\.([^.]+)$/); return m ? m[1].toLowerC
 function isImage(extn){ return ['png','jpg','jpeg','gif','bmp','webp','svg'].includes(extn); }
 function isMarkdown(extn){ return ['md','markdown','mdown'].includes(extn); }
 
-function makeIcon(type, name){
-  if(type === 'dir') return '📁';
-  const e = ext(name);
-  if(isImage(e)) return '🖼️';
-  if(isMarkdown(e)) return '📝';
-  return '📄';
-}
+function makeIcon(type, name){ if(type === 'dir') return '📁'; const e = ext(name); if(isImage(e)) return '🖼️'; if(isMarkdown(e)) return '📝'; return '📄'; }
 
 function getSiteBase(){
-  // Construct base URL for Pages files.
-  // If repo is "owner.github.io" treat as user page (root at origin)
   if(!state.owner || !state.repo) return location.origin + '/';
   if(state.repo.toLowerCase() === (state.owner.toLowerCase() + '.github.io')){
     return location.origin + '/';
   }
-  // project page: origin + /repo/
   return location.origin + '/' + state.repo + '/';
 }
 
@@ -177,118 +174,51 @@ function renderList(items){
   items.forEach(it=>{
     const li = document.createElement('li');
     if(it.type === 'dir'){
-      const left = document.createElement('div'); left.style.display='flex'; left.style.alignItems='center';
-      left.innerHTML = `<span class="file-icon">${makeIcon('dir',it.name)}</span><strong>${it.name}</strong>`;
-      const right = document.createElement('div'); right.className='meta'; right.textContent = '目录';
-      li.appendChild(left); li.appendChild(right);
+      const left = document.createElement('div'); left.className='left';
+      left.innerHTML = `<span class="file-icon">${makeIcon('dir',it.name)}</span><div class="name" title="${escapeHtml(it.name)}"><strong>${it.name}</strong></div>`;
+      const meta = document.createElement('div'); meta.className='meta'; meta.textContent = '目录';
+      const actions = document.createElement('div'); actions.className='actions';
+      li.appendChild(left); li.appendChild(meta); li.appendChild(actions);
       let hoverTimer = null;
       li.addEventListener('mouseenter', ()=>{ if(treeIndex) return; if(directoryCache.has((state.path?state.path+'/':'') + it.name)) return; hoverTimer = setTimeout(()=>{ apiList((state.path?state.path+'/':'') + it.name).catch(()=>{}); }, 180); });
       li.addEventListener('mouseleave', ()=>{ if(hoverTimer) clearTimeout(hoverTimer); });
       li.addEventListener('click', ()=>{ navigateTo((state.path?state.path+'/':'') + it.name); });
     } else {
       const filePath = (state.path?state.path+'/':'') + it.name;
-      const a = document.createElement('a');
-      a.href = encodeURI(filePath);
-      a.title = filePath;
-      a.innerHTML = `<span style="display:flex;align-items:center;width:100%"><span class="file-icon">${makeIcon('file',it.name)}</span><strong>${it.name}</strong></span>`;
-      const right = document.createElement('div'); right.className='meta'; right.textContent = it.size ? (it.size + ' bytes') : '文件';
+      const left = document.createElement('div'); left.className='left';
+      left.innerHTML = `<a href="${encodeURI(filePath)}" title="${escapeHtml(filePath)}" style="display:flex;align-items:center;width:100%"><span class="file-icon">${makeIcon('file',it.name)}</span><div class="name" title="${escapeHtml(it.name)}"><strong>${it.name}</strong></div></a>`;
+      const meta = document.createElement('div'); meta.className='meta'; meta.textContent = it.size ? (it.size + ' bytes') : '文件';
+      const actions = document.createElement('div'); actions.className='actions';
 
-      // copy button
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'copy-btn';
-      copyBtn.type = 'button';
-      copyBtn.textContent = '复制地址';
-      copyBtn.title = '复制文件在 Pages 下的完整 URL';
+      const copyBtn = document.createElement('button'); copyBtn.className='copy-btn'; copyBtn.type='button'; copyBtn.textContent='复制地址'; copyBtn.title='复制文件在 Pages 下的完整 URL';
       copyBtn.addEventListener('click', async (ev)=>{
         ev.preventDefault(); ev.stopPropagation();
         const base = getSiteBase();
         const url = base + filePath;
         try{
-          if(navigator.clipboard && navigator.clipboard.writeText){
-            await navigator.clipboard.writeText(url);
-          } else {
-            // fallback
-            const ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-          }
-          copyBtn.classList.add('copied');
-          const old = copyBtn.textContent;
-          copyBtn.textContent = '已复制';
-          setTimeout(()=>{ copyBtn.classList.remove('copied'); copyBtn.textContent = old; }, 1400);
-        }catch(e){
-          alert('复制失败：' + e.message);
-        }
+          if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(url); } else { const ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+          copyBtn.classList.add('copied'); const old = copyBtn.textContent; copyBtn.textContent = '已复制'; setTimeout(()=>{ copyBtn.classList.remove('copied'); copyBtn.textContent = old; }, 1400);
+        }catch(e){ alert('复制失败：' + e.message); }
       });
 
-      li.appendChild(a); li.appendChild(right); li.appendChild(copyBtn);
+      actions.appendChild(copyBtn);
+      li.appendChild(left); li.appendChild(meta); li.appendChild(actions);
     }
     fileListEl.appendChild(li);
   });
 }
 
-function updateBreadcrumb(){
-  const parts = state.path ? state.path.split('/').filter(Boolean) : [];
-  let html = `<a href="#" data-path="">/</a>`;
-  let cur = '';
-  parts.forEach((p,i)=>{ cur += (i?'/':'')+p; html += ` / <a href='#' data-path='${cur}'>${p}</a>`; });
-  breadcrumbEl.innerHTML = html;
-  breadcrumbEl.querySelectorAll('a').forEach(a=>{ a.addEventListener('click', (ev)=>{ ev.preventDefault(); const p = a.getAttribute('data-path'); navigateTo(p); }); });
-}
+function updateBreadcrumb(){ const parts = state.path ? state.path.split('/').filter(Boolean) : []; let html = `<a href="#" data-path="">/</a>`; let cur = ''; parts.forEach((p,i)=>{ cur += (i?'/':'')+p; html += ` / <a href='#' data-path='${cur}'>${p}</a>`; }); breadcrumbEl.innerHTML = html; breadcrumbEl.querySelectorAll('a').forEach(a=>{ a.addEventListener('click', (ev)=>{ ev.preventDefault(); const p = a.getAttribute('data-path'); navigateTo(p); }); }); }
 
-async function navigateTo(path){
-  state.path = path || '';
-  updateBreadcrumb();
-  viewerContent.innerHTML = '';
-  viewerHeader.textContent = `正在列出: /${state.path}`;
-  try{
-    let res = await apiList(state.path);
-    if(!Array.isArray(res)){
-      location.href = encodeURI(state.path);
-      return;
-    }
-    if(treeIndex){ res = treeIndex.get(state.path) || []; }
-    renderList(res);
-    viewerHeader.textContent = `已列出: /${state.path} （共 ${res.length} 项）`;
-  }catch(err){
-    viewerContent.innerHTML = `<div class="empty">错误：${err.message}</div>`;
-    viewerHeader.textContent = `错误`;
-  }
-}
+async function navigateTo(path){ state.path = path || ''; updateBreadcrumb(); viewerContent.innerHTML = ''; viewerHeader.textContent = `正在列出: /${state.path}`; try{ let res = await apiList(state.path); if(!Array.isArray(res)){ location.href = encodeURI(state.path); return; } if(treeIndex){ res = treeIndex.get(state.path) || []; } renderList(res); viewerHeader.textContent = `已列出: /${state.path} （共 ${res.length} 项）`; }catch(err){ viewerContent.innerHTML = `<div class="empty">错误：${err.message}</div>`; viewerHeader.textContent = `错误`; } }
 
-async function buildAndNavigate(){
-  directoryCache.clear(); etagCache.clear(); treeIndex = null;
-  const fast = fastModeCheckbox.checked;
-  if(fast){
-    viewerHeader.innerHTML = `正在拉取整棵树 <span class="spinner"></span>`;
-    try{
-      const idx = await fetchFullTree();
-      viewerHeader.textContent = `已索引整棵树，立即响应导航`;
-      const root = idx.get('') || [];
-      directoryCache.set('', root);
-      navigateTo('');
-    }catch(err){
-      viewerContent.innerHTML = `<div class="empty">树拉取失败：${err.message}</div>`;
-      viewerHeader.textContent = `错误`;
-    }
-  } else {
-    directoryCache.clear(); etagCache.clear();
-    navigateTo('');
-  }
-}
+async function buildAndNavigate(){ directoryCache.clear(); etagCache.clear(); treeIndex = null; const fast = fastModeCheckbox.checked; if(fast){ viewerHeader.innerHTML = `正在拉取整棵树 <span class="spinner"></span>`; try{ const idx = await fetchFullTree(); viewerHeader.textContent = `已索引整棵树，立即响应导航`; const root = idx.get('') || []; directoryCache.set('', root); navigateTo(''); }catch(err){ viewerContent.innerHTML = `<div class="empty">树拉取失败：${err.message}</div>`; viewerHeader.textContent = `错误`; } } else { directoryCache.clear(); etagCache.clear(); navigateTo(''); } }
 
-loadBtn.addEventListener('click', ()=>{
-  const owner = ownerInput.value.trim();
-  const repo = repoInput.value.trim();
-  const branch = branchInput.value.trim() || 'main';
-  if(!owner || !repo){ alert('请填写 owner 和 repo'); return; }
-  setState({owner, repo, branch, path: ''});
-  buildAndNavigate();
-});
+loadBtn.addEventListener('click', ()=>{ const owner = ownerInput.value.trim(); const repo = repoInput.value.trim(); const branch = branchInput.value.trim() || 'main'; if(!owner || !repo){ alert('请填写 owner 和 repo'); return; } setState({owner, repo, branch, path: ''}); buildAndNavigate(); });
 
-(function(){
-  const guess = guessFromLocation();
-  if(guess){ setState({owner: guess.owner, repo: guess.repo, branch: 'main'}); }
-  if(state.owner && state.repo){ navigateTo(''); }
-})();
+(function(){ const guess = guessFromLocation(); if(guess){ setState({owner: guess.owner, repo: guess.repo, branch: 'main'}); } if(state.owner && state.repo){ navigateTo(''); } })();
+
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 </script>
 </body>
 </html>
